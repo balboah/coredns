@@ -6,9 +6,9 @@ type contextKey struct{}
 
 var dnstapKey = contextKey{}
 
-// ContextWithTapper returns a new `context.Context` that holds a reference to
+// contextWithTapper returns a new `context.Context` that holds a reference to
 // `t`'s Tapper.
-func ContextWithTapper(ctx context.Context, t Tapper) context.Context {
+func contextWithTapper(ctx context.Context, t Tapper) context.Context {
 	return context.WithValue(ctx, dnstapKey, t)
 }
 

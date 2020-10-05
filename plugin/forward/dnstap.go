@@ -2,6 +2,8 @@ package forward
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/coredns/coredns/plugin/dnstap"
@@ -18,43 +20,50 @@ func toDnstap(ctx context.Context, host string, f *Forward, state request.Reques
 		return nil
 	}
 	// Query
-	b := msg.New().Time(start).HostPort(host)
+	b := new(tap.Message)
+	msg.SetQueryTime(b, start)
+	ip, p, _ := net.SplitHostPort(host)     // this is preparsed and can't err here
+	port, _ := strconv.ParseUint(p, 10, 32) // same here
+
 	opts := f.opts
-	t := ""
+	t := state.Proto()
 	switch {
 	case opts.forceTCP: // TCP flag has precedence over UDP flag
 		t = "tcp"
 	case opts.preferUDP:
 		t = "udp"
-	default:
-		t = state.Proto()
 	}
 
 	if t == "tcp" {
-		b.SocketProto = tap.SocketProtocol_TCP
+		ta := &net.TCPAddr{IP: net.ParseIP(ip), Port: int(port)}
+		msg.SetQueryAddress(b, ta)
 	} else {
-		b.SocketProto = tap.SocketProtocol_UDP
+		ta := &net.UDPAddr{IP: net.ParseIP(ip), Port: int(port)}
+		msg.SetQueryAddress(b, ta)
 	}
 
 	if tapper.Pack() {
-		b.Msg(state.Req)
+		buf, err := state.Req.Pack()
+		if err != nil {
+			return err
+		}
+		b.QueryMessage = buf
 	}
-	m, err := b.ToOutsideQuery(tap.Message_FORWARDER_QUERY)
-	if err != nil {
-		return err
-	}
-	tapper.TapMessage(m)
+	msg.SetType(b, tap.Message_FORWARDER_QUERY)
+	tapper.TapMessage(b)
 
 	// Response
 	if reply != nil {
 		if tapper.Pack() {
-			b.Msg(reply)
+			buf, err := reply.Pack()
+			if err != nil {
+				return err
+			}
+			b.ResponseMessage = buf
 		}
-		m, err := b.Time(time.Now()).ToOutsideResponse(tap.Message_FORWARDER_RESPONSE)
-		if err != nil {
-			return err
-		}
-		tapper.TapMessage(m)
+		msg.SetResponseTime(b, time.Now())
+		msg.SetType(b, tap.Message_FORWARDER_RESPONSE)
+		tapper.TapMessage(b)
 	}
 
 	return nil

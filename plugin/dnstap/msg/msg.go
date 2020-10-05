@@ -1,159 +1,78 @@
 package msg
 
 import (
-	"errors"
+	"fmt"
 	"net"
-	"strconv"
 	"time"
 
 	tap "github.com/dnstap/golang-dnstap"
-	"github.com/miekg/dns"
 )
 
-// Builder helps to build a Dnstap message.
-type Builder struct {
-	Packed      []byte
-	SocketProto tap.SocketProtocol
-	SocketFam   tap.SocketFamily
-	Address     net.IP
-	Port        uint32
-	TimeSec     uint64
-	TimeNsec    uint32
-
-	err error
-}
-
-// New returns a new Builder
-func New() *Builder {
-	return &Builder{}
-}
-
-// Addr adds the remote address to the message.
-func (b *Builder) Addr(remote net.Addr) *Builder {
-	if b.err != nil {
-		return b
-	}
-
-	switch addr := remote.(type) {
+// SetQueryAddress adds the query address to the message. This also sets the SocketFamily and SocketProtocol.
+func SetQueryAddress(t *tap.Message, addr net.Addr) error {
+	inet := tap.SocketFamily_INET
+	t.SocketFamily = &inet
+	switch a := addr.(type) {
 	case *net.TCPAddr:
-		b.Address = addr.IP
-		b.Port = uint32(addr.Port)
-		b.SocketProto = tap.SocketProtocol_TCP
-	case *net.UDPAddr:
-		b.Address = addr.IP
-		b.Port = uint32(addr.Port)
-		b.SocketProto = tap.SocketProtocol_UDP
-	default:
-		b.err = errors.New("unknown remote address type")
-		return b
-	}
-
-	if b.Address.To4() != nil {
-		b.SocketFam = tap.SocketFamily_INET
-	} else {
-		b.SocketFam = tap.SocketFamily_INET6
-	}
-	return b
-}
-
-// Msg adds the raw DNS message to the dnstap message.
-func (b *Builder) Msg(m *dns.Msg) *Builder {
-	if b.err != nil {
-		return b
-	}
-
-	b.Packed, b.err = m.Pack()
-	return b
-}
-
-// HostPort adds the remote address as encoded by dnsutil.ParseHostPortOrFile to the message.
-func (b *Builder) HostPort(addr string) *Builder {
-	ip, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		b.err = err
-		return b
-	}
-	p, err := strconv.ParseUint(port, 10, 32)
-	if err != nil {
-		b.err = err
-		return b
-	}
-	b.Port = uint32(p)
-
-	if ip := net.ParseIP(ip); ip != nil {
-		b.Address = []byte(ip)
-		if ip := ip.To4(); ip != nil {
-			b.SocketFam = tap.SocketFamily_INET
-		} else {
-			b.SocketFam = tap.SocketFamily_INET6
+		t.QueryAddress = a.IP
+		p := uint32(a.Port)
+		t.QueryPort = &p
+		p1 := tap.SocketProtocol_TCP
+		t.SocketProtocol = &p1
+		if a.IP.To4() == nil {
+			inet6 := tap.SocketFamily_INET6
+			t.SocketFamily = &inet6
 		}
-		return b
+		return nil
+	case *net.UDPAddr:
+		t.QueryAddress = a.IP
+		p := uint32(a.Port)
+		t.QueryPort = &p
+		p1 := tap.SocketProtocol_UDP
+		t.SocketProtocol = &p1
+		if a.IP.To4() == nil {
+			inet6 := tap.SocketFamily_INET6
+			t.SocketFamily = &inet6
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown address type: %T", a)
 	}
-	b.err = errors.New("not an ip address")
-	return b
 }
 
-// Time adds the timestamp to the message.
-func (b *Builder) Time(ts time.Time) *Builder {
-	b.TimeSec = uint64(ts.Unix())
-	b.TimeNsec = uint32(ts.Nanosecond())
-	return b
+// SetResponseAddress the response address to the message.
+func SetResponseAddress(t *tap.Message, addr net.Addr) error {
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		t.ResponseAddress = a.IP
+		p := uint32(a.Port)
+		t.ResponsePort = &p
+		return nil
+	case *net.UDPAddr:
+		t.ResponseAddress = a.IP
+		p := uint32(a.Port)
+		t.ResponsePort = &p
+		return nil
+	default:
+		return fmt.Errorf("unknown address type: %T", a)
+	}
 }
 
-// ToClientResponse transforms Data into a client response message.
-func (b *Builder) ToClientResponse() (*tap.Message, error) {
-	t := tap.Message_CLIENT_RESPONSE
-	return &tap.Message{
-		Type:             &t,
-		SocketFamily:     &b.SocketFam,
-		SocketProtocol:   &b.SocketProto,
-		ResponseTimeSec:  &b.TimeSec,
-		ResponseTimeNsec: &b.TimeNsec,
-		ResponseMessage:  b.Packed,
-		QueryAddress:     b.Address,
-		QueryPort:        &b.Port,
-	}, b.err
+// SetQueryTime sets the time of the query in t.
+func SetQueryTime(t *tap.Message, ti time.Time) {
+	qts := uint64(ti.Unix())
+	qtn := uint32(ti.Nanosecond())
+	t.QueryTimeSec = &qts
+	t.QueryTimeNsec = &qtn
 }
 
-// ToClientQuery transforms Data into a client query message.
-func (b *Builder) ToClientQuery() (*tap.Message, error) {
-	t := tap.Message_CLIENT_QUERY
-	return &tap.Message{
-		Type:           &t,
-		SocketFamily:   &b.SocketFam,
-		SocketProtocol: &b.SocketProto,
-		QueryTimeSec:   &b.TimeSec,
-		QueryTimeNsec:  &b.TimeNsec,
-		QueryMessage:   b.Packed,
-		QueryAddress:   b.Address,
-		QueryPort:      &b.Port,
-	}, b.err
+// SetResponseTime sets the time of the response in t.
+func SetResponseTime(t *tap.Message, ti time.Time) {
+	rts := uint64(ti.Unix())
+	rtn := uint32(ti.Nanosecond())
+	t.ResponseTimeSec = &rts
+	t.ResponseTimeNsec = &rtn
 }
 
-// ToOutsideQuery transforms the data into a forwarder or resolver query message.
-func (b *Builder) ToOutsideQuery(t tap.Message_Type) (*tap.Message, error) {
-	return &tap.Message{
-		Type:            &t,
-		SocketFamily:    &b.SocketFam,
-		SocketProtocol:  &b.SocketProto,
-		QueryTimeSec:    &b.TimeSec,
-		QueryTimeNsec:   &b.TimeNsec,
-		QueryMessage:    b.Packed,
-		ResponseAddress: b.Address,
-		ResponsePort:    &b.Port,
-	}, b.err
-}
-
-// ToOutsideResponse transforms the data into a forwarder or resolver response message.
-func (b *Builder) ToOutsideResponse(t tap.Message_Type) (*tap.Message, error) {
-	return &tap.Message{
-		Type:             &t,
-		SocketFamily:     &b.SocketFam,
-		SocketProtocol:   &b.SocketProto,
-		ResponseTimeSec:  &b.TimeSec,
-		ResponseTimeNsec: &b.TimeNsec,
-		ResponseMessage:  b.Packed,
-		ResponseAddress:  b.Address,
-		ResponsePort:     &b.Port,
-	}, b.err
-}
+// SetType sets the type in t.
+func SetType(t *tap.Message, typ tap.Message_Type) { t.Type = &typ }

@@ -66,28 +66,34 @@ $ dnstap -l 127.0.0.1:6000
 
 ## Using Dnstap in your plugin
 
-~~~ Go
+~~~ go
 import (
     "github.com/coredns/coredns/plugin/dnstap"
     "github.com/coredns/coredns/plugin/dnstap/msg"
+
+    tap "githum.com/dnstap/golang-dnstap"
 )
 
 func (h Dnstap) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
     // log client query to Dnstap
     if t := dnstap.TapperFromContext(ctx); t != nil {
-        b := msg.New().Time(time.Now()).Addr(w.RemoteAddr())
+        b := new(msg.Msg)
+        msg.SetQueryTime(b, time.Now())
+        msg.SetQueryAddress(b, w.RemoteAddr())
         if t.Pack() {
-            b.Msg(r)
+            buf, err := r.Pack()
+            if err ! {
+                return dns.RcodeServerFailure, err
+            }
+            b.QueryMessage = buf
         }
-        if m, err := b.ToClientQuery(); err == nil {
-            t.TapMessage(m)
-        }
+        msg.SetType(b, tap.Message_CLIENT_QUERY)
+        t.TapMessage(b)
     }
-
     // ...
 }
 ~~~
 
 ## See Also
 
-[dnstap.info](https://dnstap.info).
+The website [dnstap.info](https://dnstap.info) has info on the dnstap protocol.

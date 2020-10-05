@@ -10,14 +10,7 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/parse"
 )
 
-func init() { plugin.Register("dnstap", wrapSetup) }
-
-func wrapSetup(c *caddy.Controller) error {
-	if err := setup(c); err != nil {
-		return plugin.Error("dnstap", err)
-	}
-	return nil
-}
+func init() { plugin.Register("dnstap", setup) }
 
 type config struct {
 	target string
@@ -53,7 +46,7 @@ func parseConfig(d *caddy.Controller) (c config, err error) {
 func setup(c *caddy.Controller) error {
 	conf, err := parseConfig(c)
 	if err != nil {
-		return err
+		return plugin.Error("dnstap", err)
 	}
 
 	dio := dnstapio.New(conf.target, conf.socket)

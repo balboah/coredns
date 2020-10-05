@@ -6,10 +6,8 @@ import (
 )
 
 func TestDnstapContext(t *testing.T) {
-	ctx := ContextWithTapper(context.TODO(), Dnstap{})
-	tapper := TapperFromContext(ctx)
-
-	if tapper == nil {
+	ctx := contextWithTapper(context.TODO(), Dnstap{})
+	if tapper := TapperFromContext(ctx); tapper == nil {
 		t.Fatal("Can't get tapper")
 	}
 }
