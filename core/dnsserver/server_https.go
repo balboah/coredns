@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"encoding/json"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/response"
 	"github.com/coredns/coredns/plugin/pkg/reuseport"
 	"github.com/coredns/coredns/plugin/pkg/transport"
+
+	"github.com/miekg/dns"
 )
 
 // ServerHTTPS represents an instance of a DNS-over-HTTPS server.
@@ -131,7 +134,7 @@ func (s *ServerHTTPS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := doh.RequestToMsg(r)
+	isJson, msg, err := doh.RequestToMsg(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -156,21 +159,36 @@ func (s *ServerHTTPS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// We are using code 500 to indicate an unexpected situation when the chain
 	// handler has not provided any response message.
 	if dw.Msg == nil {
-		http.Error(w, "No response", http.StatusInternalServerError)
+		if isJson {
+			http.Error(w, "{ \"error\": \"No response\" }", http.StatusInternalServerError)
+		} else {
+			http.Error(w, "No response", http.StatusInternalServerError)
+		}
 		return
 	}
 
-	buf, _ := dw.Msg.Pack()
 
 	mt, _ := response.Typify(dw.Msg, time.Now().UTC())
 	age := dnsutil.MinimalTTL(dw.Msg, mt)
 
-	w.Header().Set("Content-Type", doh.MimeType)
 	w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%f", age.Seconds()))
-	w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
 	w.WriteHeader(http.StatusOK)
 
-	w.Write(buf)
+	if isJson {
+		jsonResp := newJsonResponse(dw.Msg, age)
+		buf, _ := json.Marshal(jsonResp)
+		w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+		w.Header().Set("Content-Type", doh.MimeTypeJson)
+
+		w.Write(buf)
+	} else {
+		buf, _ := dw.Msg.Pack()
+
+		w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+		w.Header().Set("Content-Type", doh.MimeType)
+
+		w.Write(buf)
+	}
 }
 
 // Shutdown stops the server (non gracefully).
@@ -179,4 +197,68 @@ func (s *ServerHTTPS) Shutdown() error {
 		s.httpsServer.Shutdown(context.Background())
 	}
 	return nil
+}
+
+func newJsonResponse(msg *dns.Msg, age time.Duration) jsonResponse {
+	msgHdr := msg.MsgHdr
+	status := msgHdr.Rcode
+	tc := msgHdr.Truncated
+	rd := msgHdr.RecursionDesired
+	ra := msgHdr.RecursionAvailable
+	ad := msgHdr.AuthenticatedData
+	cd := msgHdr.CheckingDisabled
+	var qType uint16
+	var question = make([]jsonQuestion, len(msg.Question))
+	for index, q := range msg.Question {
+		question[index] = jsonQuestion{q.Name, q.Qtype}
+		qType = q.Qtype
+	}
+
+	var answer []jsonAnswer
+	for _, e := range msg.Answer {
+		answer = rrToAnswer(e, qType, answer)
+	}
+	for _, e := range msg.Extra {
+		answer = rrToAnswer(e, qType, answer)
+	}
+	for _, e := range msg.Ns {
+		answer = rrToAnswer(e, qType, answer)
+	}
+
+	return jsonResponse{status, tc, rd, ra, ad, cd, question, answer}
+}
+
+func rrToAnswer(rr dns.RR, requested uint16, a []jsonAnswer) []jsonAnswer {
+	header := rr.Header()
+
+	if requested != header.Rrtype {
+		return a
+	}
+
+	answer := jsonAnswer{header.Name, header.Rrtype, header.Ttl, rr.String()} // FIXME: replace with rr.Data() once https://github.com/miekg/dns/issues/1204 gets fixed
+
+	return append(a, answer)
+}
+
+type jsonResponse struct {
+	Status	int
+	TC		bool
+	RD		bool
+	RA		bool
+	AD		bool
+	CD		bool
+	Question []jsonQuestion
+	Answer   []jsonAnswer
+}
+
+type jsonQuestion struct {
+	Name	string	`json:"name"`
+	Type	uint16	`json:"type"`
+}
+
+type jsonAnswer struct {
+	Name	string	`json:"name"`
+	Type	uint16	`json:"type"`
+	TTL		uint32		`json:"TTL"`
+	Data	string	`json:"data"`
 }

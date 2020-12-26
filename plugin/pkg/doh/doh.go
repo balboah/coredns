@@ -13,6 +13,7 @@ import (
 
 // MimeType is the DoH mimetype that should be used.
 const MimeType = "application/dns-message"
+const MimeTypeJson = "application/dns-json"
 
 // Path is the URL path that should be used.
 const Path = "/dns-query"
@@ -60,16 +61,17 @@ func ResponseToMsg(resp *http.Response) (*dns.Msg, error) {
 }
 
 // RequestToMsg converts a http.Request to a dns message.
-func RequestToMsg(req *http.Request) (*dns.Msg, error) {
+func RequestToMsg(req *http.Request) (bool, *dns.Msg, error) {
 	switch req.Method {
 	case http.MethodGet:
 		return requestToMsgGet(req)
 
 	case http.MethodPost:
-		return requestToMsgPost(req)
+		m, err := requestToMsgPost(req)
+		return false, m, err
 
 	default:
-		return nil, fmt.Errorf("method not allowed: %s", req.Method)
+		return false, nil, fmt.Errorf("method not allowed: %s", req.Method)
 	}
 }
 
@@ -80,16 +82,43 @@ func requestToMsgPost(req *http.Request) (*dns.Msg, error) {
 }
 
 // requestToMsgGet extract the dns message from the GET request.
-func requestToMsgGet(req *http.Request) (*dns.Msg, error) {
+func requestToMsgGet(req *http.Request) (bool, *dns.Msg, error) {
 	values := req.URL.Query()
 	b64, ok := values["dns"]
-	if !ok {
-		return nil, fmt.Errorf("no 'dns' query parameter found")
+	if ok {
+		if len(b64) != 1 {
+			return false, nil, fmt.Errorf("multiple 'dns' query values found")
+		}
+		m, err := base64ToMsg(b64[0])
+		return false, m, err
 	}
-	if len(b64) != 1 {
-		return nil, fmt.Errorf("multiple 'dns' query values found")
+	name, ok := values["name"]
+	if ok {
+		if len(name) != 1 {
+			return true, nil, fmt.Errorf("multiple 'name' query values found")
+		}
+		qType, ok := values["type"]
+		if !ok {
+			return true, nil, fmt.Errorf("no 'type' query parameter found")
+		}
+		if len(qType) != 1 {
+			return true, nil, fmt.Errorf("multiple 'type' query values found")
+		}
+
+		qTypeInt, ok := dns.StringToType[qType[0]]
+		if !ok {
+			return true, nil, fmt.Errorf("'type' is not a RR type")
+		}
+		m := new(dns.Msg)
+
+		m.SetQuestion(dns.Fqdn(name[0]), qTypeInt)
+		m.SetEdns0(4096, true)	// enable dnssec
+
+		return true, m, nil
+		// TODO: return msg
+	} else {
+		return false, nil, fmt.Errorf("no 'dns' or 'name' query parameter found")
 	}
-	return base64ToMsg(b64[0])
 }
 
 func toMsg(r io.ReadCloser) (*dns.Msg, error) {
