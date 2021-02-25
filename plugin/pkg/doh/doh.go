@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"strconv"
 
 	"github.com/miekg/dns"
 )
@@ -105,20 +106,24 @@ func requestToMsgGet(req *http.Request) (bool, *dns.Msg, error) {
 			return true, nil, fmt.Errorf("multiple 'type' query values found")
 		}
 
-		qTypeInt, ok := dns.StringToType[qType[0]]
-		if !ok {
-			return true, nil, fmt.Errorf("'type' is not a RR type")
+		// Try to first parse integer type, fallback to string to int type
+		qTypeInt, err := strconv.Atoi(qType[0])
+		qTypeUint := uint16(qTypeInt)
+		if err != nil {
+			qTypeUint, ok = dns.StringToType[qType[0]]
+			if !ok {
+				return true, nil, fmt.Errorf("'type' is not a RR type")
+			}
 		}
 		m := new(dns.Msg)
 
-		m.SetQuestion(dns.Fqdn(name[0]), qTypeInt)
-		m.SetEdns0(4096, true)	// enable dnssec
+		m.SetQuestion(dns.Fqdn(name[0]), qTypeUint)
+		m.SetEdns0(4096, true) // enable dnssec
 
 		return true, m, nil
-		// TODO: return msg
-	} else {
-		return false, nil, fmt.Errorf("no 'dns' or 'name' query parameter found")
 	}
+
+	return false, nil, fmt.Errorf("no 'dns' or 'name' query parameter found")
 }
 
 func toMsg(r io.ReadCloser) (*dns.Msg, error) {
