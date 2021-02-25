@@ -1,13 +1,14 @@
 package dnsserver
 
 import (
-	"encoding/json"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coredns/caddy"
@@ -167,7 +168,6 @@ func (s *ServerHTTPS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
 	mt, _ := response.Typify(dw.Msg, time.Now().UTC())
 	age := dnsutil.MinimalTTL(dw.Msg, mt)
 
@@ -235,30 +235,31 @@ func rrToAnswer(rr dns.RR, requested uint16, a []jsonAnswer) []jsonAnswer {
 		return a
 	}
 
-	answer := jsonAnswer{header.Name, header.Rrtype, header.Ttl, rr.String()} // FIXME: replace with rr.Data() once https://github.com/miekg/dns/issues/1204 gets fixed
+	data := strings.Replace(rr.String(), rr.Header().String(), "", 1)
+	answer := jsonAnswer{header.Name, header.Rrtype, header.Ttl, data}
 
 	return append(a, answer)
 }
 
 type jsonResponse struct {
-	Status	int
-	TC		bool
-	RD		bool
-	RA		bool
-	AD		bool
-	CD		bool
+	Status   int
+	TC       bool
+	RD       bool
+	RA       bool
+	AD       bool
+	CD       bool
 	Question []jsonQuestion
 	Answer   []jsonAnswer
 }
 
 type jsonQuestion struct {
-	Name	string	`json:"name"`
-	Type	uint16	`json:"type"`
+	Name string `json:"name"`
+	Type uint16 `json:"type"`
 }
 
 type jsonAnswer struct {
-	Name	string	`json:"name"`
-	Type	uint16	`json:"type"`
-	TTL		uint32		`json:"TTL"`
-	Data	string	`json:"data"`
+	Name string `json:"name"`
+	Type uint16 `json:"type"`
+	TTL  uint32 `json:"TTL"`
+	Data string `json:"data"`
 }
