@@ -101,7 +101,8 @@ func requestToMsgGet(req *http.Request) (bool, *dns.Msg, error) {
 		}
 		qType, ok := values["type"]
 		if !ok {
-			return true, nil, fmt.Errorf("no 'type' query parameter found")
+			// Default to A, like cloudflare does
+			qType = []string{"A"}
 		}
 		if len(qType) != 1 {
 			return true, nil, fmt.Errorf("multiple 'type' query values found")
