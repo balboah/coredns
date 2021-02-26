@@ -150,7 +150,7 @@ func (s *ServerHTTPS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isJson, msg, err := doh.RequestToMsg(r)
+	isJSON, msg, err := doh.RequestToMsg(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		s.countResponse(http.StatusBadRequest)
@@ -177,7 +177,7 @@ func (s *ServerHTTPS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// We are using code 500 to indicate an unexpected situation when the chain
 	// handler has not provided any response message.
 	if dw.Msg == nil {
-		if isJson {
+		if isJSON {
 			http.Error(w, "{ \"error\": \"No response\" }", http.StatusInternalServerError)
 		} else {
 			http.Error(w, "No response", http.StatusInternalServerError)
@@ -193,7 +193,7 @@ func (s *ServerHTTPS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	s.countResponse(http.StatusOK)
 
-	if isJson {
+	if isJSON {
 		jsonResp := newJsonResponse(dw.Msg, age)
 		buf, _ := json.Marshal(jsonResp)
 		w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
