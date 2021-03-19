@@ -232,7 +232,15 @@ func rrToAnswer(rr dns.RR, requested uint16, a []jsonAnswer) []jsonAnswer {
 	header := rr.Header()
 
 	if requested != header.Rrtype {
-		return a
+		switch requested {
+		// In the case of A/AAAA websites need the CNAME record to function.
+		case dns.TypeA, dns.TypeAAAA:
+			if header.Rrtype != dns.TypeCNAME {
+				return a
+			}
+		default:
+			return a
+		}
 	}
 
 	data := strings.Replace(rr.String(), rr.Header().String(), "", 1)
