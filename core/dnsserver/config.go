@@ -91,6 +91,9 @@ type Config struct {
 
 	// metaCollector references the first MetadataCollector plugin, if one exists
 	metaCollector MetadataCollector
+
+	SocketControls   []ControlFunc
+	PacketConnSetups []PacketConnSetupFunc
 }
 
 // FilterFunc is a function that filters requests from the Config

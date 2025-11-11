@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -178,5 +179,71 @@ func BenchmarkCoreServeDNS(b *testing.B) {
 
 	for b.Loop() {
 		s.ServeDNS(ctx, w, m)
+	}
+}
+
+func TestComposeControlFuncs(t *testing.T) {
+	called := []int{}
+	fst := func(network, address string, c syscall.RawConn) error {
+		called = append(called, 1)
+		return nil
+	}
+	snd := func(network, address string, c syscall.RawConn) error {
+		called = append(called, 2)
+		return nil
+	}
+
+	combined := composeControlFuncs([]ControlFunc{nil, fst, snd})
+	if combined == nil {
+		t.Fatalf("expected combined control func")
+	}
+	if err := combined("tcp", ":0", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(called) != 2 || called[0] != 1 || called[1] != 2 {
+		t.Fatalf("control funcs called out of order: %v", called)
+	}
+
+	errSentinel := errors.New("boom")
+	errCombined := composeControlFuncs([]ControlFunc{func(string, string, syscall.RawConn) error { return errSentinel }, snd})
+	if err := errCombined("tcp", ":0", nil); !errors.Is(err, errSentinel) {
+		t.Fatalf("expected %v, got %v", errSentinel, err)
+	}
+
+	if composeControlFuncs(nil) != nil {
+		t.Fatalf("expected nil when no control funcs provided")
+	}
+}
+
+func TestComposePacketConnSetups(t *testing.T) {
+	called := []int{}
+	fst := func(conn *net.UDPConn) error {
+		called = append(called, 1)
+		return nil
+	}
+	snd := func(conn *net.UDPConn) error {
+		called = append(called, 2)
+		return nil
+	}
+
+	combined := composePacketConnSetups([]PacketConnSetupFunc{nil, fst, snd})
+	if combined == nil {
+		t.Fatalf("expected combined packet setup func")
+	}
+	if err := combined(nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(called) != 2 || called[0] != 1 || called[1] != 2 {
+		t.Fatalf("packet setup funcs called out of order: %v", called)
+	}
+
+	errSentinel := errors.New("boom")
+	errCombined := composePacketConnSetups([]PacketConnSetupFunc{func(*net.UDPConn) error { return errSentinel }, snd})
+	if err := errCombined(nil); !errors.Is(err, errSentinel) {
+		t.Fatalf("expected %v, got %v", errSentinel, err)
+	}
+
+	if composePacketConnSetups(nil) != nil {
+		t.Fatalf("expected nil when no packet setup funcs provided")
 	}
 }

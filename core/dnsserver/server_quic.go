@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/coredns/coredns/plugin/metrics/vars"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
@@ -51,6 +52,8 @@ type ServerQUIC struct {
 	quicListener      *quic.Listener
 	maxStreams        int
 	streamProcessPool chan struct{}
+	packetSetupMu     sync.Mutex
+	packetSetupConn   net.PacketConn
 }
 
 // NewServerQUIC returns a new CoreDNS QUIC server and compiles all plugin in to it.
@@ -102,6 +105,10 @@ func NewServerQUIC(addr string, group []*Config) (*ServerQUIC, error) {
 
 // ServePacket implements caddy.UDPServer interface.
 func (s *ServerQUIC) ServePacket(p net.PacketConn) error {
+	if err := s.applyPacketConnSetup(p, false); err != nil {
+		return err
+	}
+
 	s.m.Lock()
 	s.listenAddr = s.quicListener.Addr()
 	s.m.Unlock()
@@ -211,8 +218,13 @@ func (s *ServerQUIC) serveQUICStream(stream *quic.Stream, conn *quic.Conn) {
 
 // ListenPacket implements caddy.UDPServer interface.
 func (s *ServerQUIC) ListenPacket() (net.PacketConn, error) {
-	p, err := reuseport.ListenPacket("udp", s.Addr[len(transport.QUIC+"://"):])
+	addr := s.Addr[len(transport.QUIC+"://"):]
+	ctrl := s.socketControlFunc()
+	p, err := reuseport.ListenPacketWithControl("udp", addr, ctrl)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.applyPacketConnSetup(p, true); err != nil {
 		return nil, err
 	}
 
@@ -257,6 +269,41 @@ func (s *ServerQUIC) Serve(l net.Listener) error { return nil }
 
 // Listen implements caddy.TCPServer interface.
 func (s *ServerQUIC) Listen() (net.Listener, error) { return nil, nil }
+
+func (s *ServerQUIC) applyPacketConnSetup(p net.PacketConn, closeOnError bool) error {
+	if p == nil {
+		return nil
+	}
+
+	s.packetSetupMu.Lock()
+	defer s.packetSetupMu.Unlock()
+
+	if s.packetSetupConn == p {
+		return nil
+	}
+
+	setup := s.packetConnSetupFunc()
+	if setup == nil {
+		s.packetSetupConn = p
+		return nil
+	}
+
+	udpConn, ok := p.(*net.UDPConn)
+	if !ok {
+		s.packetSetupConn = p
+		return nil
+	}
+
+	if err := setup(udpConn); err != nil {
+		if closeOnError {
+			p.Close()
+		}
+		return err
+	}
+
+	s.packetSetupConn = p
+	return nil
+}
 
 // closeQUICConn quietly closes the QUIC connection.
 func (s *ServerQUIC) closeQUICConn(conn *quic.Conn, code quic.ApplicationErrorCode) {

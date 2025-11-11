@@ -84,11 +84,9 @@ func (s *ServergRPC) ServePacket(p net.PacketConn) error { return nil }
 
 // Listen implements caddy.TCPServer interface.
 func (s *ServergRPC) Listen() (net.Listener, error) {
-	l, err := reuseport.Listen("tcp", s.Addr[len(transport.GRPC+"://"):])
-	if err != nil {
-		return nil, err
-	}
-	return l, nil
+	addr := s.Addr[len(transport.GRPC+"://"):]
+	ctrl := s.socketControlFunc()
+	return reuseport.ListenWithControl("tcp", addr, ctrl)
 }
 
 // ListenPacket implements caddy.UDPServer interface.

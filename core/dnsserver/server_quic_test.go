@@ -2,9 +2,17 @@ package dnsserver
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"math/big"
+	"net"
 	"testing"
+	"time"
+
+	"github.com/coredns/coredns/plugin/pkg/transport"
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
@@ -223,6 +231,113 @@ func TestServerQUIC_IsExpectedErr(t *testing.T) {
 	}
 }
 
+func TestServerQUICServePacketRunsSetup(t *testing.T) {
+	cfg := testConfig(transport.QUIC, testPlugin{})
+	cfg.TLSConfig = newTestTLSConfig(t)
+	setupCalled := make(chan struct{}, 1)
+	cfg.PacketConnSetups = []PacketConnSetupFunc{
+		func(conn *net.UDPConn) error {
+			if conn == nil {
+				t.Fatal("expected UDP connection")
+			}
+			select {
+			case setupCalled <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+
+	server, err := NewServerQUIC(transport.QUIC+"://127.0.0.1:0", []*Config{cfg})
+	if err != nil {
+		t.Fatalf("NewServerQUIC() failed: %v", err)
+	}
+
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP() failed: %v", err)
+	}
+	t.Cleanup(func() { udpConn.Close() })
+
+	listener, err := quic.Listen(udpConn, server.tlsConfig, server.quicConfig)
+	if err != nil {
+		t.Fatalf("quic.Listen() failed: %v", err)
+	}
+	server.quicListener = listener
+	t.Cleanup(func() { listener.Close() })
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ServePacket(udpConn)
+	}()
+
+	select {
+	case <-setupCalled:
+	case <-time.After(time.Second):
+		listener.Close()
+		t.Fatal("ServePacket did not invoke packet setup hook")
+	}
+
+	listener.Close()
+	udpConn.Close()
+
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServePacket did not exit after listener close")
+	}
+}
+
+func TestServerQUICServePacketSetupErrorPropagates(t *testing.T) {
+	cfg := testConfig(transport.QUIC, testPlugin{})
+	cfg.TLSConfig = newTestTLSConfig(t)
+	setupErr := errors.New("setup failed")
+	cfg.PacketConnSetups = []PacketConnSetupFunc{
+		func(*net.UDPConn) error { return setupErr },
+	}
+
+	server, err := NewServerQUIC(transport.QUIC+"://127.0.0.1:0", []*Config{cfg})
+	if err != nil {
+		t.Fatalf("NewServerQUIC() failed: %v", err)
+	}
+
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP() failed: %v", err)
+	}
+	t.Cleanup(func() { udpConn.Close() })
+
+	listener, err := quic.Listen(udpConn, server.tlsConfig, server.quicConfig)
+	if err != nil {
+		t.Fatalf("quic.Listen() failed: %v", err)
+	}
+	server.quicListener = listener
+	t.Cleanup(func() { listener.Close() })
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ServePacket(udpConn)
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, setupErr) {
+			t.Fatalf("ServePacket() error = %v, want %v", err, setupErr)
+		}
+	case <-time.After(time.Second):
+		listener.Close()
+		udpConn.Close()
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, setupErr) {
+				t.Fatalf("ServePacket() error = %v, want %v", err, setupErr)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("ServePacket did not exit after listener close")
+		}
+	}
+}
+
 func TestValidRequest(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -398,5 +513,32 @@ func TestAddPrefix(t *testing.T) {
 				t.Errorf("AddPrefix() = %v, want %v", result, tt.expected)
 			}
 		})
+	}
+}
+
+func newTestTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{der},
+			PrivateKey:  key,
+		}},
+		NextProtos: []string{"doq"},
 	}
 }

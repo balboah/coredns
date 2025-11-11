@@ -109,11 +109,9 @@ func (s *ServerHTTPS) ServePacket(p net.PacketConn) error { return nil }
 
 // Listen implements caddy.TCPServer interface.
 func (s *ServerHTTPS) Listen() (net.Listener, error) {
-	l, err := reuseport.Listen("tcp", s.Addr[len(transport.HTTPS+"://"):])
-	if err != nil {
-		return nil, err
-	}
-	return l, nil
+	addr := s.Addr[len(transport.HTTPS+"://"):]
+	ctrl := s.socketControlFunc()
+	return reuseport.ListenWithControl("tcp", addr, ctrl)
 }
 
 // ListenPacket implements caddy.UDPServer interface.

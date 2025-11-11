@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coredns/caddy"
@@ -49,10 +50,21 @@ type Server struct {
 
 	tsigSecret map[string]string
 
+	socketControls   []ControlFunc
+	packetConnSetups []PacketConnSetupFunc
+
 	// Ensure Stop is idempotent when invoked concurrently (e.g., during reload and SIGTERM).
 	stopOnce sync.Once
 	stopErr  error
 }
+
+// ControlFunc mirrors net.ListenConfig.Control. Use it for pre-bind tweaks while CoreDNS is creating
+// a listener or PacketConn (i.e. during net.ListenConfig.Control).
+type ControlFunc func(network, address string, c syscall.RawConn) error
+
+// PacketConnSetupFunc runs after a UDP connection already exists (even if supplied by systemd)
+// but before dns.Server starts serving, enabling post-bind adjustments on *net.UDPConn values.
+type PacketConnSetupFunc func(conn *net.UDPConn) error
 
 // MetadataCollector is a plugin that can retrieve metadata functions from all metadata providing plugins
 type MetadataCollector interface {
@@ -123,6 +135,13 @@ func NewServer(addr string, group []*Config) (*Server, error) {
 			}
 		}
 		site.pluginChain = stack
+
+		if len(site.SocketControls) > 0 {
+			s.socketControls = append(s.socketControls, site.SocketControls...)
+		}
+		if len(site.PacketConnSetups) > 0 {
+			s.packetConnSetups = append(s.packetConnSetups, site.PacketConnSetups...)
+		}
 	}
 
 	if !s.debug {
@@ -135,6 +154,54 @@ func NewServer(addr string, group []*Config) (*Server, error) {
 
 // Compile-time check to ensure Server implements the caddy.GracefulServer interface
 var _ caddy.GracefulServer = &Server{}
+
+func (s *Server) socketControlFunc() ControlFunc {
+	return composeControlFuncs(s.socketControls)
+}
+
+func (s *Server) packetConnSetupFunc() PacketConnSetupFunc {
+	return composePacketConnSetups(s.packetConnSetups)
+}
+
+func composeControlFuncs(funcs []ControlFunc) ControlFunc {
+	filtered := make([]ControlFunc, 0, len(funcs))
+	for _, fn := range funcs {
+		if fn != nil {
+			filtered = append(filtered, fn)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return func(network, address string, c syscall.RawConn) error {
+		for _, fn := range filtered {
+			if err := fn(network, address, c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func composePacketConnSetups(funcs []PacketConnSetupFunc) PacketConnSetupFunc {
+	filtered := make([]PacketConnSetupFunc, 0, len(funcs))
+	for _, fn := range funcs {
+		if fn != nil {
+			filtered = append(filtered, fn)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return func(conn *net.UDPConn) error {
+		for _, fn := range filtered {
+			if err := fn(conn); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
 
 // Serve starts the server with an existing listener. It blocks until the server stops.
 // This implements caddy.TCPServer interface.
@@ -164,6 +231,14 @@ func (s *Server) Serve(l net.Listener) error {
 // ServePacket starts the server with an existing packetconn. It blocks until the server stops.
 // This implements caddy.UDPServer interface.
 func (s *Server) ServePacket(p net.PacketConn) error {
+	if setup := s.packetConnSetupFunc(); setup != nil {
+		if udpConn, ok := p.(*net.UDPConn); ok {
+			if err := setup(udpConn); err != nil {
+				return err
+			}
+		}
+	}
+
 	s.m.Lock()
 	s.server[udp] = &dns.Server{PacketConn: p, Net: "udp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 		ctx := context.WithValue(context.Background(), Key{}, s)
@@ -177,11 +252,9 @@ func (s *Server) ServePacket(p net.PacketConn) error {
 
 // Listen implements caddy.TCPServer interface.
 func (s *Server) Listen() (net.Listener, error) {
-	l, err := reuseport.Listen("tcp", s.Addr[len(transport.DNS+"://"):])
-	if err != nil {
-		return nil, err
-	}
-	return l, nil
+	addr := s.Addr[len(transport.DNS+"://"):]
+	ctrl := s.socketControlFunc()
+	return reuseport.ListenWithControl("tcp", addr, ctrl)
 }
 
 // WrapListener Listen implements caddy.GracefulServer interface.
@@ -191,12 +264,9 @@ func (s *Server) WrapListener(ln net.Listener) net.Listener {
 
 // ListenPacket implements caddy.UDPServer interface.
 func (s *Server) ListenPacket() (net.PacketConn, error) {
-	p, err := reuseport.ListenPacket("udp", s.Addr[len(transport.DNS+"://"):])
-	if err != nil {
-		return nil, err
-	}
-
-	return p, nil
+	addr := s.Addr[len(transport.DNS+"://"):]
+	ctrl := s.socketControlFunc()
+	return reuseport.ListenPacketWithControl("udp", addr, ctrl)
 }
 
 // Stop attempts to gracefully stop the server.
